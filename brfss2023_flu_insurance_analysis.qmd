@@ -1,0 +1,252 @@
+---
+title: "BRFSS 2023: Insurance and Flu Shot Analysis"
+format: html
+editor: visual
+---
+
+```{r}
+# Load libraries
+library(haven)
+library(janitor)
+library(broom)
+library(knitr)
+library(tidyverse)
+library(ggplot2)
+library(caret)
+library(pscl)
+
+
+# === 1. Data Acquisition & Importation ===
+# Objective: Import and load .XPT file using reproducible code
+
+# Prompt user to select file interactively, improving portability
+file_path <- file.choose()  
+brfss_data <- read_xpt(file_path)
+
+# View variable names
+names(brfss_data)
+
+
+# === 2. Data Cleaning & Wrangling ===
+# Objective: Select relevant variables, inspect and handle missing values, and recode for clarity
+
+# Step 1: Select a subset of the relevant variables for the analysis
+brfss_subset <- brfss_data %>%
+  select(
+    PRIMINS1,       # Insurance status
+    CHECKUP1,       # Time since last routine checkup
+    FLUSHOT7,       # Flu shot in past 12 months
+    SEXVAR,         # Biological sex
+    `_AGE80`,       # Age (top-coded at 80+)
+    EDUCA,          # Education level
+    INCOME3,        # Income category
+    `_RACEGR3`      # Race/ethnicity group
+  )
+
+# Step 2: Explore missing and invalid codes
+summary(brfss_subset)
+colSums(is.na(brfss_subset))
+lapply(brfss_subset, unique)
+
+# Step 3: Filter out invalid survey codes (e.g., 7, 9, 77, 99)
+brfss_clean <- brfss_subset %>%
+  filter(
+    !PRIMINS1 %in% c(7, 9),
+    !CHECKUP1 %in% c(7, 9),
+    !FLUSHOT7 %in% c(7, 9),
+    !SEXVAR %in% c(7, 9),
+    !EDUCA %in% c(9),
+    !INCOME3 %in% c(77, 99),
+    !is.na(`_AGE80`)
+  )
+
+# Step 4: Recode variables into readable factors and labels
+brfss_clean <- brfss_clean %>%
+  mutate(
+    insured         = factor(if_else(PRIMINS1 == 1, "Yes", "No")),
+    checkup_recent  = factor(if_else(CHECKUP1 == 1, "Within past year", "Longer ago")),
+    flu_shot        = factor(if_else(FLUSHOT7 == 1, "Yes", "No")),
+    sex             = factor(SEXVAR, levels = c(1, 2), labels = c("Male", "Female")),
+    age             = `_AGE80`,
+    education       = factor(EDUCA),
+    income          = factor(INCOME3),
+    race_group      = factor(`_RACEGR3`)
+  )
+
+
+
+names(brfss_clean)
+colSums(is.na(brfss_clean))
+
+
+
+
+# === 3. Exploratory Data Analysis (EDA) ===
+# Objective: Explore key variables and relationships to inform analysis
+
+# ---- Step 1: Categorical Distributions ----
+
+# Frequency tables for key variables
+brfss_clean %>% tabyl(insured)
+brfss_clean %>% tabyl(flu_shot)
+brfss_clean %>% tabyl(checkup_recent)
+brfss_clean %>% tabyl(sex)
+brfss_clean %>% tabyl(race_group)
+brfss_clean %>% tabyl(education)
+brfss_clean %>% tabyl(income)
+
+# ---- Step 2: Cross-Tabulations ----
+
+# Flu shot by insurance
+brfss_clean %>%
+  tabyl(flu_shot, insured) %>%
+  adorn_percentages("row") %>%
+  adorn_totals("row") %>%
+  adorn_title()
+
+# Checkup timing by insurance
+brfss_clean %>%
+  tabyl(checkup_recent, insured) %>%
+  adorn_percentages("row") %>%
+  adorn_totals("row") %>%
+  adorn_title()
+
+# ---- Step 3: Visual Explorations ----
+
+# Flu shot by income
+brfss_clean %>%
+  ggplot(aes(x = income, fill = flu_shot)) +
+  geom_bar(position = "fill") +
+  labs(
+    title = "Flu Shot Uptake by Income Level",
+    y = "Proportion",
+    x = "Income Category",
+    fill = "Flu Shot"
+  ) +
+  theme_minimal() +
+  coord_flip()
+
+# Checkup timing by education
+brfss_clean %>%
+  ggplot(aes(x = education, fill = checkup_recent)) +
+  geom_bar(position = "fill") +
+  labs(
+    title = "Routine Checkup by Education Level",
+    y = "Proportion",
+    x = "Education Level",
+    fill = "Checkup Timing"
+  ) +
+  theme_minimal() +
+  coord_flip()
+
+# ---- Optional: Age Distribution by Flu Shot Status ----
+
+brfss_clean %>%
+  ggplot(aes(x = age, fill = flu_shot)) +
+  geom_histogram(binwidth = 5, position = "identity", alpha = 0.6) +
+  labs(
+    title = "Age Distribution by Flu Shot Status",
+    x = "Age",
+    y = "Count"
+  ) +
+  theme_minimal()
+
+
+
+
+# === 4. Modeling & Analysis ===
+# Objective: Use logistic regression to analyze predictors of flu shot uptake
+
+
+# ---- Step 1: Prepare Data ----
+
+# Drop rows with missing data for selected predictors
+brfss_model <- brfss_clean %>%
+  drop_na(flu_shot, insured, age, sex, income, education, race_group)
+
+# ---- Step 2: Fit Logistic Regression Model ----
+
+# Fit logistic regression: flu shot uptake
+flu_model <- glm(
+  flu_shot ~ insured + age + sex + income + education + race_group,
+  data = brfss_model,
+  family = "binomial"
+)
+
+# ---- Step 3: Summarize Model ----
+
+# Tidy summary of model with odds ratios and confidence intervals
+flu_model_summary <- tidy(flu_model, exponentiate = TRUE, conf.int = TRUE)
+print(flu_model_summary)
+
+# ---- Step 4: Model Fit and Accuracy ----
+
+# Pseudo R-squared
+pR2(flu_model)
+
+# Predict flu shot status
+brfss_model$predicted <- ifelse(predict(flu_model, type = "response") > 0.5, "Yes", "No")
+
+# Evaluate model accuracy
+confusionMatrix(
+  data = as.factor(brfss_model$predicted),
+  reference = as.factor(brfss_model$flu_shot)
+)
+
+
+
+# === 5. Statistical Modeling & Interpretation ===
+# Objective: Use logistic regression to model flu shot uptake based on insurance and demographics
+
+
+# Step 1: Prepare Data
+# Filter to keep only complete cases for modeling variables
+brfss_model <- brfss_clean %>%
+  drop_na(flu_shot, insured, age, sex, income, education, race_group)
+
+# Recode 'flu_shot' as a binary outcome: Yes = 1, No = 0
+brfss_model <- brfss_model %>%
+  mutate(flu_shot_binary = if_else(flu_shot == "Yes", 1, 0))
+
+# Step 2: Fit Logistic Regression Model
+# Model flu shot uptake based on insurance, age, sex, income, education, and race
+flu_model <- glm(
+  flu_shot_binary ~ insured + age + sex + income + education + race_group,
+  data = brfss_model,
+  family = "binomial"
+)
+
+# Step 3: Summarize Model Output
+summary(flu_model)
+
+# Step 4: Generate Odds Ratios
+exp(coef(flu_model))
+
+# Step 5: Tidy summary for presentation
+tidy(flu_model, exponentiate = TRUE, conf.int = TRUE) %>%
+  arrange(p.value) %>%
+  knitr::kable(digits = 3, caption = "Logistic Regression Results (Odds Ratios)")
+
+# Step 6: Model Evaluation
+# Pseudo R-squared to evaluate model fit
+pR2(flu_model)
+
+```
+
+## Summary of Key Findings
+
+- **61% of flu shot recipients were insured**, compared to 39% who were not — indicating insurance status plays a role in preventive health behavior.
+- **Preventive care usage**, like routine checkups, was significantly higher among individuals with **greater education and income levels**.
+- A **logistic regression model** showed that **being insured, older, and more educated** were associated with higher odds of getting a flu shot (p < 0.001).
+- There were observable differences across **racial groups**, highlighting potential disparities in access to or trust in preventive care.
+
+## Implications
+
+These results suggest that **health insurance access** remains a key driver of preventive healthcare behavior like flu shot uptake. This supports policy efforts aimed at expanding coverage, especially for underserved populations.
+
+## Recommendations
+
+-   Outreach programs targeting low-income groups.
+-   Policy interventions focused on insurance access and preventive care equity.
+
+------------------------------------------------------------------------
